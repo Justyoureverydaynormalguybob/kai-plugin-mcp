@@ -3,7 +3,7 @@
 A KAI Core plugin that lets AI agents on the same computer, such as Claude Code, Claude Desktop or Cursor, use KAI through the [Model Context Protocol](https://modelcontextprotocol.io).
 
 - Plugin ID `community.mcp-bridge`, version 0.1.0, native runtime, needs KAI Core 0.7.17 or later.
-- No dependencies: Node built-ins only, CommonJS, about 900 lines including the window.
+- No dependencies: Node built-ins only, CommonJS, about 1,400 lines including the window and its five languages.
 - The signed package is in `dist/`. Publisher fingerprint: `0d4883f800992901f1f4941e898031aafd10926cd5d87c0b0cfd166840df416b`.
 
 ## Why a plugin
