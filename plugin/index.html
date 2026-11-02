@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Bridge</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="i18n.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="top">
+      <div>
+        <h1 data-i18n="title">MCP Bridge</h1>
+        <p class="lede" data-i18n="lede">Let AI agents on this computer, such as Claude Code, use KAI through the Model Context Protocol.</p>
+      </div>
+      <span id="pill" class="pill pill-off" role="status" aria-live="polite">—</span>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <p id="state-text" class="state">—</p>
+        <button id="toggle" type="button" class="primary">—</button>
+      </div>
+      <p id="error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="card" id="connect" hidden>
+      <h2 data-i18n="connectTitle">Connect an agent</h2>
+      <label class="field">
+        <span data-i18n="address">Address</span>
+        <input id="url" type="text" readonly>
+      </label>
+      <label class="field">
+        <span data-i18n="token">Access token</span>
+        <span class="inline">
+          <input id="token" type="password" readonly autocomplete="off">
+          <button id="show-token" type="button" data-i18n="show">Show</button>
+          <button id="copy-token" type="button" data-i18n="copy">Copy</button>
+        </span>
+      </label>
+      <p class="hint" data-i18n="tokenHint">Anyone with this token can use what you allow below, from this computer. Keep it to yourself.</p>
+      <label class="field">
+        <span data-i18n="claudeCode">Claude Code: run this once in a terminal</span>
+        <textarea id="cmd-claude" rows="3" readonly></textarea>
+        <button id="copy-claude" type="button" data-i18n="copy">Copy</button>
+      </label>
+      <label class="field">
+        <span data-i18n="otherClients">Other MCP clients (HTTP with a header)</span>
+        <textarea id="cmd-json" rows="8" readonly></textarea>
+        <button id="copy-json" type="button" data-i18n="copy">Copy</button>
+      </label>
+      <button id="rotate" type="button" class="quiet" data-i18n="rotate">Make a new token</button>
+    </section>
+
+    <section class="card">
+      <h2 data-i18n="accessTitle">What agents can use</h2>
+      <p class="hint" data-i18n="accessHint">KAI's models and privacy status are always included. Turn on other plugins one by one.</p>
+      <div id="sources" class="checks"></div>
+      <label class="check strong">
+        <input id="allow-changes" type="checkbox">
+        <span>
+          <strong data-i18n="allowChanges">Allow changes</strong>
+          <small data-i18n="allowChangesHint">Agents can ask to load models, change privacy, save documents, run workflows and similar. You approve every single change in KAI before it happens.</small>
+        </span>
+      </label>
+      <p class="hint" id="tool-count"></p>
+    </section>
+
+    <section class="card">
+      <h2 data-i18n="portTitle">Port</h2>
+      <div class="inline">
+        <input id="port" type="number" min="1024" max="65535" inputmode="numeric">
+        <button id="save-port" type="button" data-i18n="save">Save</button>
+      </div>
+      <p class="hint" data-i18n="portHint">The bridge listens on 127.0.0.1 only, so other computers cannot reach it.</p>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <h2 data-i18n="activityTitle">Recent activity</h2>
+        <button id="clear" type="button" class="quiet" data-i18n="clear">Clear</button>
+      </div>
+      <p id="client" class="hint"></p>
+      <ol id="activity" class="activity"></ol>
+      <p class="hint" data-i18n="activityHint">Only the tool name, time and result are kept, in memory. What agents send and receive is not stored.</p>
+    </section>
+  </main>
+</body>
+</html>

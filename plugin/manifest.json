@@ -1,0 +1,31 @@
+{
+  "schema": 2,
+  "apiVersion": 3,
+  "id": "community.mcp-bridge",
+  "version": "0.1.0",
+  "name": "MCP Bridge",
+  "description": "Lets AI agents on this computer, such as Claude Code, use KAI through the Model Context Protocol. Off until you turn it on, local to this computer, and every change is approved by you in KAI.",
+  "entry": "index.html",
+  "runtime": "native",
+  "service": "service/index.js",
+  "permissions": [
+    "native.execute",
+    "models.read",
+    "models.manage",
+    "network.status",
+    "network.configure",
+    "storage.read",
+    "storage.write",
+    "secrets.use",
+    "services.call"
+  ],
+  "provides": [],
+  "consumes": [
+    "kai.documents",
+    "kai.workflows",
+    "kai.brain",
+    "kai.assistant",
+    "kai.code",
+    "kai.tools"
+  ]
+}

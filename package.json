@@ -1,0 +1,14 @@
+{
+  "name": "kai-plugin-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP Bridge: a KAI Core plugin that lets AI agents on this computer use KAI through the Model Context Protocol",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "pack": "node scripts/pack.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
