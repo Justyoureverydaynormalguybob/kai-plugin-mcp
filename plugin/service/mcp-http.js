@@ -18,6 +18,7 @@ const crypto = require("node:crypto");
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_BODY = 1024 * 1024;
 const MAX_CONCURRENT_CALLS = 4;
+const MAX_CONNECTIONS = 32;
 
 const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 const rpcResult = (id, result) => ({ jsonrpc: "2.0", id, result });
@@ -37,7 +38,7 @@ function tokenMatches(header, token) {
  *   onActivity({ client })         ← initialize seen
  * Resolves to { port, close() } once listening.
  */
-function startMcpServer({ port, getToken, info, instructions, listTools, callTool, onClient = () => {} }) {
+function startMcpServer({ port, getToken, info, instructions, listTools, callTool, onClient = () => {}, onError = () => {} }) {
   let active = 0;
   const sockets = new Set();
 
@@ -50,6 +51,18 @@ function startMcpServer({ port, getToken, info, instructions, listTools, callToo
   server.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
   server.requestTimeout = 15 * 60 * 1000; // a workflow run or model load can take a while
   server.headersTimeout = 30 * 1000;
+  server.maxConnections = MAX_CONNECTIONS;
+  server.keepAliveTimeout = 5 * 1000;
+  // A listening server that emits 'error' with no listener throws in KAI's
+  // main process (e.g. EMFILE while accepting). Keep one for its lifetime.
+  server.on("error", (error) => { try { onError(error); } catch { /* never throw here */ } });
+  server.on("clientError", (_error, socket) => { socket.destroy(); });
+
+  // Refusals close the connection and never read the body.
+  function refuse(res, status, body, headers = {}) {
+    send(res, status, body, { connection: "close", ...headers });
+    res.req?.socket?.destroySoon?.();
+  }
 
   function send(res, status, body, headers = {}) {
     const payload = body === undefined ? "" : JSON.stringify(body);
@@ -77,21 +90,21 @@ function startMcpServer({ port, getToken, info, instructions, listTools, callToo
     const p = server.address()?.port ?? port;
     const hosts = new Set([`127.0.0.1:${p}`, `localhost:${p}`, `[::1]:${p}`]);
     if (!hosts.has(String(req.headers.host || "").toLowerCase())) {
-      return send(res, 403, { error: "Refused: use the local address and port shown in MCP Bridge." });
+      return refuse(res, 403, { error: "Refused: use the local address and port shown in MCP Bridge." });
     }
     if (req.headers.origin !== undefined) {
-      return send(res, 403, { error: "Refused: MCP Bridge does not answer web pages." });
+      return refuse(res, 403, { error: "Refused: MCP Bridge does not answer web pages." });
     }
     const path = String(req.url || "").split("?")[0];
-    if (path !== "/mcp") return send(res, 404, { error: "Not found" });
-    if (req.method !== "POST") return send(res, 405, { error: "Use POST" }, { allow: "POST" });
+    if (path !== "/mcp") return refuse(res, 404, { error: "Not found" });
+    if (req.method !== "POST") return refuse(res, 405, { error: "Use POST" }, { allow: "POST" });
     if (!tokenMatches(req.headers.authorization, getToken())) {
-      return send(res, 401, { error: "A valid bearer token is required. Copy it from MCP Bridge in KAI." }, { "www-authenticate": 'Bearer realm="kai-mcp-bridge"' });
+      return refuse(res, 401, { error: "A valid bearer token is required. Copy it from MCP Bridge in KAI." }, { "www-authenticate": 'Bearer realm="kai-mcp-bridge"' });
     }
 
     let raw;
     try { raw = await readBody(req); }
-    catch (e) { return send(res, e.status || 400, rpcError(null, -32600, e.status === 413 ? "Request too large" : "Unreadable request")); }
+    catch (e) { return refuse(res, e.status || 400, rpcError(null, -32600, e.status === 413 ? "Request too large" : "Unreadable request")); }
     let message;
     try { message = JSON.parse(raw); }
     catch { return send(res, 400, rpcError(null, -32700, "Parse error")); }
@@ -100,16 +113,13 @@ function startMcpServer({ port, getToken, info, instructions, listTools, callToo
     const controller = new AbortController();
     res.on("close", () => { if (!res.writableFinished) controller.abort(Error("Client disconnected")); });
 
-    const batch = Array.isArray(message);
-    const messages = batch ? message : [message];
-    if (!messages.length) return send(res, 400, rpcError(null, -32600, "Empty batch"));
-    const replies = [];
-    for (const m of messages) {
-      const reply = await dispatch(m, controller.signal);
-      if (reply) replies.push(reply);
-    }
-    if (!replies.length) return send(res, 202);
-    return send(res, 200, batch ? replies : replies[0]);
+    // One message per request. JSON-RPC batching was removed from MCP in
+    // 2025-06-18, and an unbounded batch is an easy way to flood KAI's main
+    // process or queue up a wall of approval dialogs.
+    if (Array.isArray(message)) return send(res, 400, rpcError(null, -32600, "Batch requests are not supported; send one message per request."));
+    const reply = await dispatch(message, controller.signal);
+    if (!reply) return send(res, 202);
+    return send(res, 200, reply);
   }
 
   async function dispatch(m, signal) {

@@ -10,6 +10,8 @@
   --ok: #1f8a4c;
   --bad: #c0362c;
   --field: #f1f2f4;
+  --warn: #c98a1b;
+  --warn-bg: #fdf6e7;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -23,6 +25,8 @@
     --ok: #4cc17f;
     --bad: #ef6b60;
     --field: #26292d;
+    --warn: #b98a35;
+    --warn-bg: #2a2418;
   }
 }
 * { box-sizing: border-box; }
@@ -44,6 +48,7 @@ h2 { font-size: 15px; margin: 0 0 10px; }
 .pill-off { color: var(--muted); }
 .pill-error { color: var(--bad); border-color: var(--bad); }
 .error { color: var(--bad); margin: 10px 0 0; }
+.notice { margin: 0 0 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--warn); background: var(--warn-bg); font-size: 13px; }
 button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); color: var(--text); cursor: pointer; }
 button:disabled { opacity: 0.6; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }

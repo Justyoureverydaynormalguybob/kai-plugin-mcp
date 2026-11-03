@@ -19,15 +19,22 @@ if (!core || !key) {
   console.error("Usage: node scripts/pack.js --core <kai-core checkout> --key <ed25519 private key .pem>");
   process.exit(2);
 }
-const root = path.resolve(__dirname, "..");
-if (path.resolve(key).startsWith(root + path.sep)) throw Error("Refusing to use a signing key stored inside this repository");
+const root = fs.realpathSync(path.resolve(__dirname, ".."));
+// Compare real paths, case-insensitively (Windows and macOS file systems
+// usually are), so no spelling of the path slips a repo key through.
+const keyReal = fs.realpathSync(path.resolve(key));
+const norm = (p) => (process.platform === "linux" ? p : p.toLowerCase());
+if (norm(keyReal).startsWith(norm(root + path.sep))) throw Error("Refusing to use a signing key stored inside this repository");
+// Sign exactly what is committed: refuse uncommitted or untracked plugin files.
+const dirty = execFileSync("git", ["status", "--porcelain", "--", "plugin"], { cwd: root, encoding: "utf8" }).trim();
+if (dirty) throw Error(`plugin/ has uncommitted or untracked changes; commit them before packing:\n${dirty}`);
 
 const source = path.join(root, "plugin");
 const manifest = JSON.parse(fs.readFileSync(path.join(source, "manifest.json"), "utf8"));
 const out = path.join(root, "dist", `kai-plugin-mcp-${manifest.version}.kaiplugin`);
 fs.mkdirSync(path.dirname(out), { recursive: true });
 
-execFileSync(process.execPath, [path.join(core, "scripts/core/pack-plugin.js"), source, path.resolve(key), out], { stdio: "inherit" });
+execFileSync(process.execPath, [path.join(core, "scripts/core/pack-plugin.js"), source, keyReal, out], { stdio: "inherit" });
 
 const { verifyPackage } = require(path.join(path.resolve(core), "core/lib/plugins/package"));
 const bytes = fs.readFileSync(out);

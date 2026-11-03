@@ -1,8 +1,21 @@
 # Release notes
 
+## 0.1.2 (2026-11-03)
+
+Merges two independent security reviews of 0.1.0. 0.1.1 below is the second review's fixes, published as source only. This release adds the first review's fixes on top. Signed.
+
+- **Workflows (High):** the runtime-wide status, which returns every run's step data, connected accounts and Brain sources, is no longer reachable. `workflow_status` and `workflow_cancel` only cover runs the bridge started, reduced to status and output; `workflow_get` returns steps without their settings.
+- **Approvals:** one at a time, with a pause after a decline, and the request's signal passed to Core. Agent text in dialogs is quoted and flattened. Updates say plainly that all of the old text is replaced.
+- **Provenance:** agent requests no longer inherit the bridge window's call context (`AsyncLocalStorage.snapshot()`), so they never appear to come from a person at a KAI page, and reloading the page no longer breaks them.
+- **Endpoint:** batches refused, results capped at 4 MB, 32 connections, a permanent server error handler, refused connections closed. A random port for each install; if the port is taken, the token is replaced and shared conversations withdrawn.
+- **Storage:** Linux `basic_text` refused as insecure.
+- **Removed `document_remove` and `brain_forget`** until a provider dialog can name the agent as the requester (0.1.1's handling of a declined delete is therefore no longer needed).
+- **Window:** warns that anything an agent reads goes to that agent's AI provider, even with KAI on Local-Only (all five languages).
+- `pack.js`: case-insensitive real-path key check; refuses uncommitted plugin files.
+
 ## 0.1.1 (2026-11-03)
 
-Security fixes from an audit. Not yet signed: build with `scripts/pack.js`.
+Security fixes from an audit. Source only; never signed. Superseded by 0.1.2.
 
 - Approval dialogs can no longer be dressed up by the agent. Arguments are validated before the dialog; titles must be one line of plain text, at most 200 characters; dialog text has line breaks and bidi overrides flattened. `document_save` now shows the start of the new content and, for an update, the title Documents really holds for that id.
 - A delete declined in Documents (which answers `{ cancelled: true }`) is reported as not approved instead of success.

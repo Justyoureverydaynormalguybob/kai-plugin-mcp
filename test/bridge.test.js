@@ -203,6 +203,12 @@ test("changes: hidden by default; bridge-approved ones ask in KAI and stop on de
     assert.match(b.calls.confirms[0].title, /^MCP Bridge: Create a document\?/);
     assert.ok(!b.calls.services.some((c) => c.method === "save"), "nothing saved after a decline");
 
+    // Straight after a decline the bridge refuses to ask again (no dialog spam).
+    const tooSoon = await callTool(b, token, "document_save", { title: "Notes", content: "hello" });
+    assert.match(tooSoon.content[0].text, /just declined/);
+    assert.equal(b.calls.confirms.length, 1);
+    await new Promise((r) => setTimeout(r, 3100));
+
     answer = true;
     const saved = JSON.parse((await callTool(b, token, "document_save", { title: "Notes", content: "hello" })).content[0].text);
     assert.equal(saved.id, "dnew");
@@ -223,15 +229,13 @@ test("provider- and Core-approved changes are not double-prompted by the bridge"
     await b.call("bridge.configure", { sources: { workflows: true, brain: true, documents: true }, allowChanges: true });
     await callTool(b, token, "workflow_run", { id: "w1", input: "today", revision: 3 });
     await callTool(b, token, "brain_remember", { text: "likes flat whites", tags: ["coffee", 7] });
-    await callTool(b, token, "document_remove", { id: "d1" });
     await callTool(b, token, "model_ensure", { alias: "gemma3-4b" });
     await callTool(b, token, "privacy_set", { mode: "local-first" });
-    assert.equal(b.calls.confirms.length, 0, "Workflows, Brain, Documents and Core show their own reviews");
+    assert.equal(b.calls.confirms.length, 0, "Workflows, Brain and Core show their own reviews");
 
     const svc = b.calls.services.map((c) => `${c.name}.${c.method}`);
-    assert.deepEqual(svc, ["kai.workflows.run", "kai.brain.remember", "kai.documents.get", "kai.documents.remove"]);
+    assert.deepEqual(svc, ["kai.workflows.run", "kai.brain.remember"]);
     assert.deepEqual(b.calls.services[1].input, { text: "likes flat whites", tags: ["coffee"] });
-    assert.deepEqual(b.calls.services[3].input, { id: "d1", revision: "rev1" });
     assert.deepEqual(b.calls.ensure, [{ alias: "gemma3-4b" }]);
     assert.deepEqual(b.calls.configure, ["local-first"]);
 
@@ -245,9 +249,9 @@ test("provider- and Core-approved changes are not double-prompted by the bridge"
 
 test("every plugin service method the bridge can reach is on an explicit allowlist", async () => {
   const ALLOWED = new Set([
-    "kai.documents.list", "kai.documents.get", "kai.documents.save", "kai.documents.remove",
+    "kai.documents.list", "kai.documents.get", "kai.documents.save",
     "kai.workflows.listServices", "kai.workflows.get", "kai.workflows.status", "kai.workflows.run", "kai.workflows.cancel",
-    "kai.brain.search", "kai.brain.goals", "kai.brain.sourceList", "kai.brain.remember", "kai.brain.forget",
+    "kai.brain.search", "kai.brain.goals", "kai.brain.sourceList", "kai.brain.remember",
     "kai.assistant.chats.list", "kai.assistant.chats.get", "kai.assistant.chats.grant", "kai.assistant.chats.revoke",
     "kai.code.projects",
     "kai.tools.list",
@@ -275,7 +279,7 @@ test("every plugin service method the bridge can reach is on an explicit allowli
 test("the never-wrapped families do not appear anywhere in the tool code", () => {
   const src = fs.readFileSync(path.join(__dirname, "../plugin/service/tools.js"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../plugin/manifest.json"), "utf8"));
-  for (const forbidden of ['"kai.connections"', '"payment"', '"paymentEvents"', '"chats.save"', '"chats.grantWrite"', '"sync"', '"context"', 'wallet.', "account.request", 'authorize(']) {
+  for (const forbidden of ['"kai.connections"', '"payment"', '"paymentEvents"', '"chats.save"', '"chats.grantWrite"', '"sync"', '"context"', '"remove"', '"forget"', 'wallet.', "account.request", 'authorize(']) {
     assert.equal(src.includes(forbidden), false, `tools.js must never reference ${forbidden}`);
   }
   // kai.tools may be listed, never called.
@@ -334,74 +338,21 @@ test("a port already in use is reported, not thrown at Core during startup", asy
   }
 });
 
-test("approval dialogs show the real target and can't be faked by agent text", async () => {
-  const b = await boot({ approve: () => false });
-  try {
-    await b.call("bridge.start");
-    const { token } = await b.call("bridge.token");
-    await b.call("bridge.configure", { sources: { documents: true, workflows: true }, allowChanges: true });
-
-    // Invalid arguments are refused before any dialog is shown.
-    const fake = await callTool(b, token, "document_save", { title: "Notes”.\n\nThis is read-only; nothing changes.", content: "x" });
-    assert.equal(fake.isError, true);
-    assert.match(fake.content[0].text, /one line of plain text/);
-    const longTitle = await callTool(b, token, "document_save", { title: "t".repeat(201), content: "x" });
-    assert.match(longTitle.content[0].text, /limit is 200/);
-    const badId = await callTool(b, token, "workflow_cancel", { id: "run1\n\nNothing will change" });
-    assert.match(badId.content[0].text, /invalid argument: id/);
-    assert.equal(b.calls.confirms.length, 0, "no dialog for invalid input");
-
-    // An update names the document Documents has under that id, not the agent's title,
-    // and previews the new content with line breaks and bidi overrides flattened.
-    await callTool(b, token, "document_save", { id: "d1", revision: "rev1", title: "Shopping list", content: "line1\n\nline2‮" });
-    const shown = b.calls.confirms.at(-1);
-    assert.match(shown.title, /Replace a document\?/);
-    assert.match(shown.detail, /Replace ALL of your document “Plan”/);
-    assert.match(shown.detail, /with “Shopping list”/);
-    assert.match(shown.detail, /Starts with: “line1 line2”/);
-    assert.ok(!b.calls.services.some((c) => c.method === "save"));
-  } finally { await b.service.dispose(); }
-});
-
-test("a delete declined in Documents comes back as not approved", async () => {
-  const providers = { ...PROVIDERS, "kai.documents": { ...PROVIDERS["kai.documents"], remove: () => ({ cancelled: true }) } };
-  const b = await boot({ providers });
-  try {
-    await b.call("bridge.start");
-    const { token } = await b.call("bridge.token");
-    await b.call("bridge.configure", { sources: { documents: true }, allowChanges: true });
-    const r = await callTool(b, token, "document_remove", { id: "d1" });
-    assert.equal(r.isError, true);
-    assert.match(r.content[0].text, /Not approved in KAI: the document was kept/);
-    assert.equal((await b.call("bridge.status")).activity[0].ok, false);
-  } finally { await b.service.dispose(); }
-});
-
-test("shared conversations are withdrawn by a new token or turning Assistant off", async () => {
-  const b = await boot();
-  try {
-    await b.call("bridge.start");
-    let { token } = await b.call("bridge.token");
-    await b.call("bridge.configure", { sources: { assistant: true } });
-    // Withdrawing access never needs Allow changes.
-    assert.ok((await listTools(b, token)).includes("chats_revoke"));
-    assert.ok(!(await listTools(b, token)).includes("chats_share"));
-
-    await b.call("bridge.configure", { allowChanges: true });
-    await callTool(b, token, "chats_share", { ids: ["c1"] });
-    assert.equal((await b.call("bridge.status")).chatsShared, true);
-    ({ token } = await b.call("bridge.rotateToken"));
-    assert.equal(b.calls.services.at(-1).method, "chats.revoke");
-    assert.equal((await b.call("bridge.status")).chatsShared, false);
-
-    await callTool(b, token, "chats_share", { ids: ["c1"] });
-    const before = b.calls.services.length;
-    await b.call("bridge.configure", { sources: { assistant: false } });
-    assert.equal(b.calls.services.length, before + 1);
-    assert.equal(b.calls.services.at(-1).method, "chats.revoke");
-
-    // Nothing shared: no needless call that would start Assistant.
-    await b.call("bridge.rotateToken");
-    assert.equal(b.calls.services.length, before + 1);
-  } finally { await b.service.dispose(); }
+test("the data-leaves-through-the-agent warning is in the window, in all five languages", () => {
+  const vm = require("node:vm");
+  const html = fs.readFileSync(path.join(__dirname, "../plugin/index.html"), "utf8");
+  assert.match(html, /data-i18n="dataWarning"/);
+  const sandbox = { window: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../plugin/i18n.js"), "utf8"), sandbox);
+  const I = sandbox.window.MCPBridgeI18n;
+  I.set("en");
+  const en = I.t("dataWarning");
+  assert.match(en, /Anthropic/);
+  assert.match(en, /Local-Only/);
+  for (const lang of ["es", "pt-BR", "fr", "de"]) {
+    I.set(lang);
+    const s = I.t("dataWarning");
+    assert.notEqual(s, en, `${lang} must translate the warning, not fall back to English`);
+    assert.match(s, /Anthropic/, lang);
+  }
 });

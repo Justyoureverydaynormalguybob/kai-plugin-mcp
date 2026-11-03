@@ -11,7 +11,7 @@ function createFakeApi({ encryption = true, approve = true, providers = {} } = {
 
   const api = {
     version: 1,
-    plugin: Object.freeze({ id: "community.mcp-bridge", version: "0.1.1", root: "/fake/root", dataDir: "/fake/data" }),
+    plugin: Object.freeze({ id: "community.mcp-bridge", version: "0.1.0", root: "/fake/root", dataDir: "/fake/data" }),
     paths: { protected: ["/fake/profile"] },
     signal: controller.signal,
     settings: {
@@ -75,8 +75,14 @@ const PROVIDERS = {
   },
   "kai.workflows": {
     listServices: () => [{ id: "w1", name: "Morning brief", draft: false, revision: 3 }],
-    get: ({ id }) => ({ id, name: "Morning brief", graph: {} }),
-    status: (input) => (input.id ? { key: input.id, status: "running" } : { running: 0 }),
+    // Shapes as in kai-plugin-workflows: graphs carry step config (incl. HTTP
+    // headers), run records carry the spec and every step's input/output, and
+    // the no-id status is the whole store plus connections and Brain sources.
+    get: ({ id }) => ({ id, name: "Morning brief", revision: 3, draft: false, enabled: true, schedule: { kind: "daily", hour: 7 },
+      graph: { nodes: [{ id: "n1", type: "http_request", label: "Fetch", config: { url: "https://api.example", headers: { authorization: "Bearer SECRET-HEADER" } } }] } }),
+    status: (input) => (input.id
+      ? { id: input.id, workflowId: "w1", name: "Morning brief", status: "done", startedAt: 1, finishedAt: 2, spec: { secret: "SPEC-SECRET" }, steps: [{ output: "STEP-PRIVATE-EMAIL" }], previous: "Final summary" }
+      : { workflows: [], runs: [{ steps: [{ output: "STEP-PRIVATE-EMAIL" }] }], connections: [{ account: "me@example.com" }], sources: [] }),
     run: () => ({ id: "run1" }),
     cancel: () => ({ cancelled: true }),
   },

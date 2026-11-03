@@ -11,38 +11,51 @@
  *     explicit choice.
  *   - Read access to other plugins is off per source until ticked.
  *   - Changes are hidden until "Allow changes" is ticked, and even then every
- *     change is approved by a person in the KAI window (see tools.js).
+ *     change is approved by a person in the KAI window (see tools.js). One
+ *     approval at a time; a short pause after a decline.
  *   - The token is generated here, stored encrypted with the OS secret store,
  *     and shown only in this plugin's own window.
  *   - Tool arguments and results are never logged or persisted; the activity
  *     list keeps tool name, time, duration and success only, in memory.
+ *
+ * Provenance: the listener is started OUTSIDE Core's call context. Starting
+ * it from the window's Turn on call would otherwise make every later agent
+ * request inherit that window as its "initiator" (Node AsyncLocalStorage
+ * flows into the server's sockets) — dialogs would claim a person at the
+ * bridge page asked, and a reload of the page would abort every call.
  */
 const crypto = require("node:crypto");
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { startMcpServer } = require("./mcp-http");
 const { tools, visibleTools, annotations, SOURCES } = require("./tools");
 
-const DEFAULT_PORT = 41111;
+const DEFAULT_PORT = 41111;            // fallback only; each install picks its own
+const PORT_RANGE = [42000, 48999];
 const ACTIVITY_MAX = 100;
+const RESULT_MAX_BYTES = 4 * 1024 * 1024;
+const DECLINE_COOLDOWN_MS = 3000;
 const SOURCE_KEYS = Object.keys(SOURCES).filter((k) => k !== "core");
-
-// Note on approvals: the dialogs Core and other plugins show for a change
-// requested here are Core's, and which window and "Requested by" line they
-// use is decided by Core, not by this plugin (see README, "Who approves").
 
 const INSTRUCTIONS =
   "You are connected to KAI (KAI Core Beta) on the user's own computer through the MCP Bridge plugin. " +
-  "Start with kai_status. Changes are approved by the user in the KAI window: if a change comes back " +
-  "'not approved', tell the user and do not retry it unasked. For local model inference, use KAI's " +
-  "OpenAI-compatible API at http://127.0.0.1:41100/v1 directly.";
+  "Start with kai_status. Everything you read here goes to your own AI provider, whatever KAI's privacy " +
+  "mode says, so read only what the task needs. Changes are approved by the user in the KAI window; if a " +
+  "change comes back not approved, tell the user and do not retry it unasked.";
 
 function create(api) {
   if (api.version !== 1) throw Error("MCP Bridge requires KAI Foundation API v1");
+  // A function that runs code in the async context of create(), i.e. outside
+  // whatever renderer call later presses Turn on (see the header comment).
+  const outside = typeof AsyncLocalStorage.snapshot === "function" ? AsyncLocalStorage.snapshot() : (fn, ...a) => fn(...a);
   let closed = false;
   let server = null;
   let starting = null;
   let lastError = null;
   let lastClient = null;
+  let approving = false;
+  let declinedAt = 0;
   const activity = [];
+  const runs = new Set(); // workflow runs this bridge started (in memory only)
 
   const alive = (signal) => {
     if (closed) throw Error("MCP Bridge is closed");
@@ -51,9 +64,15 @@ function create(api) {
   };
 
   // ----- settings -----
+  const validPort = (p) => Number.isInteger(p) && p >= 1024 && p <= 65535;
   const port = () => {
-    const p = api.settings.get("port", DEFAULT_PORT);
-    return Number.isInteger(p) && p >= 1024 && p <= 65535 ? p : DEFAULT_PORT;
+    const p = api.settings.get("port", null);
+    if (validPort(p)) return p;
+    // A fixed, well-known port invites squatting by another local program
+    // while the bridge is off. Pick one per install and keep it.
+    const picked = crypto.randomInt(PORT_RANGE[0], PORT_RANGE[1] + 1);
+    api.settings.set("port", picked);
+    return picked;
   };
   const allowChanges = () => api.settings.get("allowChanges", false) === true;
   const sources = () => {
@@ -63,8 +82,14 @@ function create(api) {
 
   // ----- token: random, encrypted at rest with the OS secret store -----
   let tokenCache = null;
+  function secureStorage() {
+    if (!api.secrets.isEncryptionAvailable()) return false;
+    // Electron's Linux fallback "basic_text" encrypts with a hard-coded key.
+    try { if (api.secrets.getSelectedStorageBackend?.() === "basic_text") return false; } catch { /* not reported */ }
+    return true;
+  }
   function requireEncryption() {
-    if (!api.secrets.isEncryptionAvailable()) {
+    if (!secureStorage()) {
       throw Error("This computer has no secure storage available for the bridge's access token, so MCP Bridge cannot be turned on.");
     }
   }
@@ -93,10 +118,22 @@ function create(api) {
     if (activity.length > ACTIVITY_MAX) activity.length = ACTIVITY_MAX;
   }
 
-  async function approve(title, detail) {
-    const ok = await api.desktop.confirm(`MCP Bridge: ${title}`, `An AI agent connected through MCP Bridge wants to do this:\n\n${detail}`);
-    if (!ok) {
-      throw Error("Not approved in KAI. The user declined, or the KAI window was hidden (approvals need it open). Tell the user; do not retry unasked.");
+  async function approve(title, detail, signal) {
+    if (approving) throw Error("Another change is already waiting for the user's approval in KAI. Wait for it.");
+    if (Date.now() - declinedAt < DECLINE_COOLDOWN_MS) throw Error("The user just declined a change. Ask them before trying anything else.");
+    approving = true;
+    try {
+      const ok = await api.desktop.confirm(
+        `MCP Bridge: ${title}`,
+        `An AI agent connected through MCP Bridge asks for this:\n\n${detail}`,
+        signal,
+      );
+      if (!ok) {
+        declinedAt = Date.now();
+        throw Error("Not approved in KAI. The user declined, or the MCP Bridge page wasn't open in KAI (approvals need it). Tell the user; do not retry unasked.");
+      }
+    } finally {
+      approving = false;
     }
   }
 
@@ -116,7 +153,7 @@ function create(api) {
     if (!tool) {
       const known = tools.find((t) => t.name === name);
       const why = !known
-        ? `Unknown tool: ${name}`
+        ? `Unknown tool: ${String(name).slice(0, 64)}`
         : known.mutating && !allowChanges()
           ? `"${name}" makes changes, and the user has not ticked "Allow changes" in MCP Bridge.`
           : `"${name}" needs the ${SOURCES[known.source].label} source, which is off in MCP Bridge.`;
@@ -127,25 +164,30 @@ function create(api) {
     const ctx = {
       api,
       signal,
+      runs,
       sources: sources(),
       allowChanges: allowChanges(),
+      alive: () => { alive(signal); if (!server) throw Error("MCP Bridge was turned off"); },
       call: (service, method, input) => api.services.call(service, method, input, { signal }),
     };
     try {
       alive(signal);
-      if (tool.approval === "bridge") {
-        // confirm() validates the arguments and builds the dialog from them
-        // (and, for updates, from the provider's own data) before anything runs.
-        const { title, detail } = await tool.confirm(ctx, args);
+      let result;
+      if (tool.prepare) {
+        const prepared = await tool.prepare(ctx, args); // validates and looks up first
         alive(signal);
-        await approve(title, detail);
-        alive(signal);
+        if (tool.approval === "bridge") await approve(prepared.title, prepared.detail, signal);
+        ctx.alive();
+        result = await tool.run(ctx, prepared.input);
+      } else {
+        result = await tool.handler(ctx, args);
       }
-      const result = await tool.handler(ctx, args);
       if (name === "chats_share") api.settings.set("chatsShared", true);
       if (name === "chats_revoke") api.settings.set("chatsShared", false);
+      const text = JSON.stringify(result ?? null, null, 2);
+      if (Buffer.byteLength(text) > RESULT_MAX_BYTES) throw Error("The result is too large to return (over 4 MB). Ask for something narrower.");
       record({ at: started, tool: name, ok: true, ms: Date.now() - started });
-      return { content: [{ type: "text", text: JSON.stringify(result ?? null, null, 2) }] };
+      return { content: [{ type: "text", text }] };
     } catch (error) {
       record({ at: started, tool: name, ok: false, ms: Date.now() - started, error: "failed" });
       return { content: [{ type: "text", text: String(error?.message ?? error) }], isError: true };
@@ -153,12 +195,12 @@ function create(api) {
   }
 
   // Conversations shared with chats_share are granted to this plugin, not to
-  // a token. Withdraw them whenever the user cuts agents off (a new token, or
-  // the Assistant source turned off), so old access never outlives that.
+  // a token. Withdraw them whenever agents are cut off (a new token, or the
+  // Assistant source turned off), so old access never outlives that.
   async function revokeSharedChats() {
     if (api.settings.get("chatsShared", false) !== true) return;
     try {
-      await api.services.call("kai.assistant", "chats.revoke", {}, { signal: api.signal });
+      await outside(() => api.services.call("kai.assistant", "chats.revoke", {}, { signal: api.signal }));
       api.settings.set("chatsShared", false);
     } catch (error) {
       lastError = `Could not withdraw shared Assistant conversations: ${error?.message ?? error}. Withdraw them in Assistant Settings.`;
@@ -171,7 +213,7 @@ function create(api) {
     alive();
     if (server) return status();
     if (starting) { await starting; return status(); }
-    starting = (async () => {
+    starting = outside(async () => {
       if (!token()) newToken();
       try {
         server = await startMcpServer({
@@ -182,19 +224,25 @@ function create(api) {
           listTools,
           callTool,
           onClient: (client) => { lastClient = { ...client, at: Date.now() }; },
+          onError: (error) => api.log("warn", `MCP Bridge listener: ${error?.code || error?.message || error}`),
         });
         lastError = null;
         if (closed) { await server.close(); server = null; }
         else api.log("info", `MCP Bridge listening on 127.0.0.1:${server.port}`);
       } catch (error) {
         server = null;
-        lastError = error?.code === "EADDRINUSE"
-          ? `Port ${port()} is already in use on this computer. Choose another port.`
-          : `Could not start: ${error?.message ?? error}`;
+        if (error?.code === "EADDRINUSE") {
+          // Whatever holds the port may have collected the token from a
+          // client that tried to connect. Never reuse it.
+          try { newToken(); await revokeSharedChats(); } catch { /* reported below */ }
+          lastError = `Port ${port()} is already in use by another program. For safety the access token was replaced; choose another port, then give your agents the new token.`;
+        } else {
+          lastError = `Could not start: ${error?.message ?? error}`;
+        }
         api.log("warn", lastError);
         throw Error(lastError);
       }
-    })();
+    });
     try { await starting; } finally { starting = null; }
     return status();
   }
@@ -209,7 +257,7 @@ function create(api) {
   function status() {
     const p = server?.port ?? port();
     let encryption = false;
-    try { encryption = api.secrets.isEncryptionAvailable(); } catch { /* reported as false */ }
+    try { encryption = secureStorage(); } catch { /* reported as false */ }
     return {
       version: api.plugin.version,
       running: !!server,
@@ -232,7 +280,7 @@ function create(api) {
   // ----- the bridge window's own methods -----
   async function configure(input = {}) {
     if (input.port !== undefined) {
-      if (!Number.isInteger(input.port) || input.port < 1024 || input.port > 65535) throw Error("Choose a port between 1024 and 65535.");
+      if (!validPort(input.port)) throw Error("Choose a port between 1024 and 65535.");
       const changed = input.port !== port();
       api.settings.set("port", input.port);
       if (changed && server) { await stop(); await start(); }
@@ -277,10 +325,8 @@ function create(api) {
           return status();
         case "bridge.configure":
           return configure(input || {});
-        case "bridge.token": {
-          const t = token();
-          return { token: t };
-        }
+        case "bridge.token":
+          return { token: token() };
         case "bridge.rotateToken":
           newToken(); // existing clients stop working at once
           await revokeSharedChats();
@@ -302,4 +348,4 @@ function create(api) {
   };
 }
 
-module.exports = { create, DEFAULT_PORT };
+module.exports = { create, DEFAULT_PORT, PORT_RANGE };

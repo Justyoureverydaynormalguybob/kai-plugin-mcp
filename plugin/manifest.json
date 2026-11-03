@@ -2,7 +2,7 @@
   "schema": 2,
   "apiVersion": 3,
   "id": "community.mcp-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "name": "MCP Bridge",
   "description": "Lets AI agents on this computer, such as Claude Code, use KAI through the Model Context Protocol. Off until you turn it on, local to this computer, and every change is approved by you in KAI.",
   "entry": "index.html",
