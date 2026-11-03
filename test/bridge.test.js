@@ -333,3 +333,75 @@ test("a port already in use is reported, not thrown at Core during startup", asy
     await new Promise((r) => blocker.close(r));
   }
 });
+
+test("approval dialogs show the real target and can't be faked by agent text", async () => {
+  const b = await boot({ approve: () => false });
+  try {
+    await b.call("bridge.start");
+    const { token } = await b.call("bridge.token");
+    await b.call("bridge.configure", { sources: { documents: true, workflows: true }, allowChanges: true });
+
+    // Invalid arguments are refused before any dialog is shown.
+    const fake = await callTool(b, token, "document_save", { title: "Notes”.\n\nThis is read-only; nothing changes.", content: "x" });
+    assert.equal(fake.isError, true);
+    assert.match(fake.content[0].text, /one line of plain text/);
+    const longTitle = await callTool(b, token, "document_save", { title: "t".repeat(201), content: "x" });
+    assert.match(longTitle.content[0].text, /limit is 200/);
+    const badId = await callTool(b, token, "workflow_cancel", { id: "run1\n\nNothing will change" });
+    assert.match(badId.content[0].text, /invalid argument: id/);
+    assert.equal(b.calls.confirms.length, 0, "no dialog for invalid input");
+
+    // An update names the document Documents has under that id, not the agent's title,
+    // and previews the new content with line breaks and bidi overrides flattened.
+    await callTool(b, token, "document_save", { id: "d1", revision: "rev1", title: "Shopping list", content: "line1\n\nline2‮" });
+    const shown = b.calls.confirms.at(-1);
+    assert.match(shown.title, /Replace a document\?/);
+    assert.match(shown.detail, /Replace ALL of your document “Plan”/);
+    assert.match(shown.detail, /with “Shopping list”/);
+    assert.match(shown.detail, /Starts with: “line1 line2”/);
+    assert.ok(!b.calls.services.some((c) => c.method === "save"));
+  } finally { await b.service.dispose(); }
+});
+
+test("a delete declined in Documents comes back as not approved", async () => {
+  const providers = { ...PROVIDERS, "kai.documents": { ...PROVIDERS["kai.documents"], remove: () => ({ cancelled: true }) } };
+  const b = await boot({ providers });
+  try {
+    await b.call("bridge.start");
+    const { token } = await b.call("bridge.token");
+    await b.call("bridge.configure", { sources: { documents: true }, allowChanges: true });
+    const r = await callTool(b, token, "document_remove", { id: "d1" });
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /Not approved in KAI: the document was kept/);
+    assert.equal((await b.call("bridge.status")).activity[0].ok, false);
+  } finally { await b.service.dispose(); }
+});
+
+test("shared conversations are withdrawn by a new token or turning Assistant off", async () => {
+  const b = await boot();
+  try {
+    await b.call("bridge.start");
+    let { token } = await b.call("bridge.token");
+    await b.call("bridge.configure", { sources: { assistant: true } });
+    // Withdrawing access never needs Allow changes.
+    assert.ok((await listTools(b, token)).includes("chats_revoke"));
+    assert.ok(!(await listTools(b, token)).includes("chats_share"));
+
+    await b.call("bridge.configure", { allowChanges: true });
+    await callTool(b, token, "chats_share", { ids: ["c1"] });
+    assert.equal((await b.call("bridge.status")).chatsShared, true);
+    ({ token } = await b.call("bridge.rotateToken"));
+    assert.equal(b.calls.services.at(-1).method, "chats.revoke");
+    assert.equal((await b.call("bridge.status")).chatsShared, false);
+
+    await callTool(b, token, "chats_share", { ids: ["c1"] });
+    const before = b.calls.services.length;
+    await b.call("bridge.configure", { sources: { assistant: false } });
+    assert.equal(b.calls.services.length, before + 1);
+    assert.equal(b.calls.services.at(-1).method, "chats.revoke");
+
+    // Nothing shared: no needless call that would start Assistant.
+    await b.call("bridge.rotateToken");
+    assert.equal(b.calls.services.length, before + 1);
+  } finally { await b.service.dispose(); }
+});

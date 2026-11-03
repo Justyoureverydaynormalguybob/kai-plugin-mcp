@@ -25,6 +25,10 @@ const DEFAULT_PORT = 41111;
 const ACTIVITY_MAX = 100;
 const SOURCE_KEYS = Object.keys(SOURCES).filter((k) => k !== "core");
 
+// Note on approvals: the dialogs Core and other plugins show for a change
+// requested here are Core's, and which window and "Requested by" line they
+// use is decided by Core, not by this plugin (see README, "Who approves").
+
 const INSTRUCTIONS =
   "You are connected to KAI (KAI Core Beta) on the user's own computer through the MCP Bridge plugin. " +
   "Start with kai_status. Changes are approved by the user in the KAI window: if a change comes back " +
@@ -130,16 +134,35 @@ function create(api) {
     try {
       alive(signal);
       if (tool.approval === "bridge") {
-        const { title, detail } = tool.confirm(args);
+        // confirm() validates the arguments and builds the dialog from them
+        // (and, for updates, from the provider's own data) before anything runs.
+        const { title, detail } = await tool.confirm(ctx, args);
+        alive(signal);
         await approve(title, detail);
         alive(signal);
       }
       const result = await tool.handler(ctx, args);
+      if (name === "chats_share") api.settings.set("chatsShared", true);
+      if (name === "chats_revoke") api.settings.set("chatsShared", false);
       record({ at: started, tool: name, ok: true, ms: Date.now() - started });
       return { content: [{ type: "text", text: JSON.stringify(result ?? null, null, 2) }] };
     } catch (error) {
       record({ at: started, tool: name, ok: false, ms: Date.now() - started, error: "failed" });
       return { content: [{ type: "text", text: String(error?.message ?? error) }], isError: true };
+    }
+  }
+
+  // Conversations shared with chats_share are granted to this plugin, not to
+  // a token. Withdraw them whenever the user cuts agents off (a new token, or
+  // the Assistant source turned off), so old access never outlives that.
+  async function revokeSharedChats() {
+    if (api.settings.get("chatsShared", false) !== true) return;
+    try {
+      await api.services.call("kai.assistant", "chats.revoke", {}, { signal: api.signal });
+      api.settings.set("chatsShared", false);
+    } catch (error) {
+      lastError = `Could not withdraw shared Assistant conversations: ${error?.message ?? error}. Withdraw them in Assistant Settings.`;
+      api.log("warn", lastError);
     }
   }
 
@@ -198,6 +221,7 @@ function create(api) {
       sourceLabels: Object.fromEntries(SOURCE_KEYS.map((k) => [k, SOURCES[k].label])),
       toolCount: visibleTools({ sources: sources(), allowChanges: allowChanges() }).length,
       hasToken: !!token(),
+      chatsShared: api.settings.get("chatsShared", false) === true,
       encryption,
       lastError,
       lastClient,
@@ -225,6 +249,7 @@ function create(api) {
         next[key] = value;
       }
       api.settings.set("sources", next);
+      if (next.assistant !== true) await revokeSharedChats();
     }
     return status();
   }
@@ -258,6 +283,7 @@ function create(api) {
         }
         case "bridge.rotateToken":
           newToken(); // existing clients stop working at once
+          await revokeSharedChats();
           return { ...status(), token: token() };
         case "bridge.clearActivity":
           activity.length = 0;

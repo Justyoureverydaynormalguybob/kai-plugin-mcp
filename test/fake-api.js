@@ -11,7 +11,7 @@ function createFakeApi({ encryption = true, approve = true, providers = {} } = {
 
   const api = {
     version: 1,
-    plugin: Object.freeze({ id: "community.mcp-bridge", version: "0.1.0", root: "/fake/root", dataDir: "/fake/data" }),
+    plugin: Object.freeze({ id: "community.mcp-bridge", version: "0.1.1", root: "/fake/root", dataDir: "/fake/data" }),
     paths: { protected: ["/fake/profile"] },
     signal: controller.signal,
     settings: {

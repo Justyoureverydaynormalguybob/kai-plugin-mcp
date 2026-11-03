@@ -58,6 +58,33 @@ function id(value, name = "id") {
   return value;
 }
 
+// Control, line-break and bidirectional-override characters. Kept out of
+// titles and out of everything shown in an approval dialog, so text an agent
+// supplies can never imitate the dialog's own wording.
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+/** Agent-supplied text made safe for one line of an approval dialog. */
+function plain(value, max) {
+  const s = String(value ?? "").replace(UNSAFE, " ").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/** Validated document_save input. Runs before the dialog, so nothing invalid is ever shown. */
+function saveInput(args) {
+  const input = { content: text(args.content, "content", 10_000_000), title: "" };
+  if (args.title !== undefined) {
+    if (typeof args.title !== "string") throw Error("title must be a string");
+    if (args.title.length > 200) throw Error(`title is ${args.title.length} characters; the limit is 200`);
+    if (new RegExp(UNSAFE.source).test(args.title)) throw Error("title must be one line of plain text");
+    input.title = args.title;
+  }
+  if (args.id !== undefined) {
+    input.id = id(args.id);
+    input.revision = text(args.revision, "revision", 200);
+  }
+  return input;
+}
+
 // Through the service bus: Core resolves the provider, starts it if needed,
 // and refuses with "Install and enable a plugin providing …" when absent.
 const via = (source, method, input = {}) => (ctx) => ctx.call(SOURCES[source].service, method, input);
@@ -95,9 +122,9 @@ const tools = [
     mutating: true,
     approval: "core",
     description:
-      "CHANGE — ask KAI to download (if needed) and load a local model by alias. KAI shows its own " +
-      "review in its window, with the download size, and the user approves or cancels there. " +
-      "Downloads can be several GB.",
+      "CHANGE — ask KAI to download (if needed) and load a local model by alias. KAI asks the user " +
+      "in its own window (the dialog names the model, not the size). Downloads can be several GB: " +
+      "tell the user the downloadSizeBytes from models_list first.",
     inputSchema: obj({ alias: str("Model alias from models_list, e.g. koinos-balanced") }, ["alias"]),
     handler: async (ctx, args) => {
       const alias = id(args.alias, "alias");
@@ -156,18 +183,28 @@ const tools = [
       id: str("Existing document id, to update it"),
       revision: str("Revision from document_get (required with id)"),
     }, ["content"]),
-    confirm: (args) => ({
-      title: args.id ? "Update a document?" : "Create a document?",
-      detail: `${args.id ? `Replace document ${args.id}` : "Create a new document"}: “${args.title || "Untitled"}” (${String(args.content ?? "").length} characters).`,
-    }),
-    handler: (ctx, args) => {
-      const input = { content: text(args.content, "content", 10_000_000), title: typeof args.title === "string" ? args.title : "" };
-      if (args.id !== undefined) {
-        input.id = id(args.id);
-        input.revision = text(args.revision, "revision", 200);
+    // The dialog shows what really happens: for an update, the existing
+    // document's own title (read from Documents, not taken from the agent),
+    // and in both cases the start of the new content.
+    confirm: async (ctx, args) => {
+      const input = saveInput(args);
+      const size = `${input.content.length.toLocaleString("en")} characters`;
+      const preview = `Starts with: “${plain(input.content, 400)}”`;
+      const named = `“${plain(input.title || "Untitled", 200)}”`;
+      if (input.id === undefined) {
+        return { title: "Create a document?", detail: `Create a new document ${named} (${size}).\n\n${preview}` };
       }
-      return ctx.call("kai.documents", "save", input);
+      const current = await ctx.call("kai.documents", "get", { id: input.id });
+      if (!current || typeof current !== "object") throw Error(`No document with id ${input.id}`);
+      return {
+        title: "Replace a document?",
+        detail:
+          `Replace ALL of your document “${plain(current.title || "Untitled", 200)}” ` +
+          `(${String(current.content ?? "").length.toLocaleString("en")} characters now) ` +
+          `with ${named} (${size}). The old text is not kept.\n\n${preview}`,
+      };
     },
+    handler: (ctx, args) => ctx.call("kai.documents", "save", saveInput(args)),
   },
   {
     name: "document_remove",
@@ -181,7 +218,10 @@ const tools = [
     handler: async (ctx, args) => {
       const docId = id(args.id);
       const revision = typeof args.revision === "string" ? args.revision : (await ctx.call("kai.documents", "get", { id: docId }))?.revision;
-      return ctx.call("kai.documents", "remove", { id: docId, revision });
+      const result = await ctx.call("kai.documents", "remove", { id: docId, revision });
+      // Documents answers a declined dialog with { cancelled: true } rather than an error.
+      if (result?.cancelled === true) throw Error("Not approved in KAI: the document was kept. Tell the user; do not retry unasked.");
+      return result;
     },
   },
 
@@ -238,7 +278,7 @@ const tools = [
     approval: "bridge",
     description: "CHANGE — cancel a running workflow by run id. The user approves in the KAI window.",
     inputSchema: obj({ id: str("Run id returned by workflow_run") }, ["id"]),
-    confirm: (args) => ({ title: "Cancel a workflow run?", detail: `Stop workflow run ${args.id}.` }),
+    confirm: (ctx, args) => ({ title: "Cancel a workflow run?", detail: `Stop workflow run ${id(args.id)}.` }),
     handler: (ctx, args) => ctx.call("kai.workflows", "cancel", { id: id(args.id) }),
   },
 
@@ -334,7 +374,8 @@ const tools = [
     description:
       "CHANGE — ask the user to share up to 100 Assistant conversations with the bridge so chat_get " +
       "can read them without a dialog each time. Assistant lists them and asks; access lasts until " +
-      "revoked (chats_revoke, or Assistant Settings).",
+      "revoked (chats_revoke, or Assistant Settings). Making a new bridge token or turning the " +
+      "Assistant source off also withdraws it.",
     inputSchema: obj({ ids: { type: "array", items: { type: "string" }, maxItems: 100, description: "Conversation ids" } }, ["ids"]),
     handler: (ctx, args) => {
       if (!Array.isArray(args.ids) || !args.ids.length) throw Error("Missing required argument: ids (non-empty array)");
@@ -346,7 +387,9 @@ const tools = [
     source: "assistant",
     mutating: true,
     approval: "none",
-    description: "CHANGE — withdraw every Assistant conversation previously shared with the bridge. Only ever reduces access.",
+    description:
+      "Withdraw every Assistant conversation previously shared with the bridge. Only ever reduces " +
+      "access, so it is available whenever the Assistant source is on, even without Allow changes.",
     inputSchema: obj(),
     handler: via("assistant", "chats.revoke"),
   },
@@ -390,9 +433,14 @@ function annotations(tool) {
   };
 }
 
-/** The tools visible under the user's current bridge settings. */
+/**
+ * The tools visible under the user's current bridge settings. A change that
+ * only ever removes access (approval "none") is never hidden behind Allow
+ * changes: taking access away should not need more permission than having it.
+ */
 function visibleTools({ sources = {}, allowChanges = false } = {}) {
-  return tools.filter((t) => (t.source === "core" || sources[t.source] === true) && (!t.mutating || allowChanges));
+  return tools.filter((t) =>
+    (t.source === "core" || sources[t.source] === true) && (!t.mutating || allowChanges || t.approval === "none"));
 }
 
-module.exports = { tools, visibleTools, annotations, SOURCES, PRIVACY_MODES };
+module.exports = { tools, visibleTools, annotations, plain, SOURCES, PRIVACY_MODES };

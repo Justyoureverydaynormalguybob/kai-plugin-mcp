@@ -2,9 +2,9 @@
 
 A KAI Core plugin that lets AI agents on the same computer, such as Claude Code, Claude Desktop or Cursor, use KAI through the [Model Context Protocol](https://modelcontextprotocol.io).
 
-- Plugin ID `community.mcp-bridge`, version 0.1.0, native runtime, needs KAI Core 0.7.17 or later.
+- Plugin ID `community.mcp-bridge`, version 0.1.1, native runtime, needs KAI Core 0.7.17 or later.
 - No dependencies: Node built-ins only, CommonJS, about 1,400 lines including the window and its five languages.
-- The signed package is in `dist/`. Publisher fingerprint: `0d4883f800992901f1f4941e898031aafd10926cd5d87c0b0cfd166840df416b`.
+- Signed packages are in `dist/` (each version signed once; a version without a package there has not been signed yet). Publisher fingerprint: `0d4883f800992901f1f4941e898031aafd10926cd5d87c0b0cfd166840df416b`.
 
 ## Why a plugin
 
@@ -18,21 +18,26 @@ This plugin is that bridge. It uses only the documented Foundation API v1 and th
 | --- | --- |
 | Installing starts nothing | The endpoint runs only after **Turn on** in the bridge window. `startBackground()` resumes only that explicit choice, and a failure there is shown in the window rather than thrown at Core. |
 | Local only | It binds to `127.0.0.1`. The Host header must be the loopback port, as a DNS-rebinding guard like Core's own. **Any request with an `Origin` header is refused**, so a web page can never drive it. It accepts POST `/mcp` only. |
-| Token | 32 random bytes, stored encrypted with `api.secrets` (it refuses to turn on without secure storage), shown only in the bridge's own window and checked in constant time. **Make a new token** locks out old clients at once. |
+| Token | 32 random bytes, stored encrypted with `api.secrets` (it refuses to turn on without secure storage), shown only in the bridge's own window and checked in constant time. **Make a new token** locks out old clients at once and withdraws any Assistant conversations shared with the bridge. The Claude Code command line stores the token in your shell history and in Claude's settings file, so make a new token if either is ever shared. |
 | Opt-in per plugin | Documents, Workflows, Brain, Assistant, Code and Tools are each off until ticked. With none ticked, agents see two read-only tools. |
-| Changes | Hidden until **Allow changes** is ticked. Even then, a person approves every change in the KAI window, never the agent (see below). If the window is hidden, `desktop.confirm` returns false and the change is refused. |
+| Changes | Hidden until **Allow changes** is ticked. Even then, a person approves every change in a KAI dialog, never the agent (see below). Dialogs need KAI's window open and showing the right plugin; otherwise `desktop.confirm` returns false and the change is refused. |
+| Honest dialogs | The bridge validates arguments before it asks. Its dialogs flatten line breaks and bidirectional-override characters, show the start of any new content, and for an update name the document Documents really holds under that id, not a title the agent made up. |
 | No data kept | Tool arguments and results are never logged or stored. The activity list holds tool name, time, duration and success, in memory only. |
 
 ### Who approves each change
 
 | Tool | Approved by |
 | --- | --- |
-| `model_ensure`, `privacy_set` | Core's own review (`models.ensure`, `network.configure`) |
+| `model_ensure`, `privacy_set` | Core's own review (`models.ensure`, `network.configure`). It names the model or the mode; it doesn't show a download size, so the tool tells the agent to give the size from `models_list` first |
 | `workflow_run`, `brain_remember`, `brain_forget`, `document_remove`, `chats_share` | The owning plugin's own dialog |
 | `document_save`, `workflow_cancel` | The bridge (`api.desktop.confirm`), because the provider has no dialog for these |
-| `chats_revoke` | Nobody needed: it only removes access |
+| `chats_revoke` | Nobody needed: it only removes access, so it's available whenever the Assistant source is on, even without **Allow changes**. Turning the Assistant source off also withdraws shared conversations |
 
 Assistant also asks every time a conversation list or an unshared conversation is read. That is Assistant's own rule, and the bridge doesn't work around it.
+
+A provider that answers a declined dialog with `{ cancelled: true }` instead of an error (Documents does, for delete) is reported to the agent as not approved, not as success.
+
+Which window a provider's dialog needs, and whether it says "Requested by MCP Bridge", is decided by Core, not by this plugin. See **For KAI maintainers** below; until that's settled, test approvals with the plugin window you expect open.
 
 ### Never wrapped, at any setting
 
@@ -64,7 +69,7 @@ Local inference isn't wrapped. KAI's `/v1` API on `127.0.0.1:41100` is already O
 
 ## Install and connect
 
-1. In KAI: **Plugins → Install 3rd Party Plugins**, choose `dist/kai-plugin-mcp-0.1.0.kaiplugin`, check the publisher fingerprint above, and accept the full-access notice for a native plugin.
+1. In KAI: **Plugins → Install 3rd Party Plugins**, choose the newest `dist/kai-plugin-mcp-<version>.kaiplugin`, check the publisher fingerprint above, and accept the full-access notice for a native plugin.
 2. Open **MCP Bridge**, press **Turn on**, and tick what agents may use.
 3. Copy the Claude Code line from the window and run it once:
    ```sh
@@ -91,7 +96,11 @@ This is offered for the KAI plugin catalog, and it's entirely your call:
 
 Two Foundation behaviours worth knowing about, in case either isn't intended:
 
-1. Service-bus calls made from the bridge's HTTP handler carry no initiating renderer, because a remote agent has no window. Providers that use `api.desktop.confirm` work as expected. A provider that ever requires `initiator` would refuse bridge calls, which is the safe result.
+1. **Who a provider's dialog says asked depends on how the listener was started.** Core finds the requester through its `AsyncLocalStorage`, and the bridge's HTTP server inherits whatever context it was created in.
+   - **Started by Turn on:** the server is created inside the bridge window's `kai.call`, so requests seem to inherit that window as initiator. Dialogs then read "Requested by MCP Bridge" and are tied to that window, so reloading it would make every later approval fail.
+   - **Resumed by `startBackground()`:** there's no initiator. A provider's dialog shows only the provider's name (for example "Brain"), with nothing to say an outside agent asked, and appears only while that provider's own view is visible.
+
+   Both read the same way from the source; neither is verified live yet. A plugin can't step outside Core's store, so the bridge can't make this consistent itself. A fix in Core might be: when a service call has no initiator, put the calling plugin into the store, and have `confirm` show "Requested by <caller>" and use the caller's view. That would help every plugin that calls another from a background task.
 2. `desktop.confirm` returns false while KAI is hidden in the tray, so agent-requested changes need the window open. That's a reasonable rule for an approval, and the bridge tells the agent so.
 
 ## Relationship to KAI
